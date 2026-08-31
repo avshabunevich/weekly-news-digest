@@ -1,0 +1,28 @@
+steps:
+  - name: python:3.12-slim
+    entrypoint: bash
+    args: ["-c", "pip install -q -r requirements.txt pytest && python -m pytest -q"]
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-t", "${_REGION}-docker.pkg.dev/$PROJECT_ID/automation/weekly-news-digest:$BUILD_ID", "."]
+  - name: gcr.io/cloud-builders/docker
+    args: ["push", "${_REGION}-docker.pkg.dev/$PROJECT_ID/automation/weekly-news-digest:$BUILD_ID"]
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - jobs
+      - deploy
+      - weekly-news-digest
+      - "--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/automation/weekly-news-digest:$BUILD_ID"
+      - "--region=${_REGION}"
+      - "--service-account=automation-runner@$PROJECT_ID.iam.gserviceaccount.com"
+      - "--set-secrets=EMAIL_TO=email-to:latest,SMTP_USERNAME=smtp-username:latest,SMTP_PASSWORD=smtp-password:latest"
+      - "--set-env-vars=TZ=Europe/Copenhagen,FIRESTORE_PROJECT_ID=$PROJECT_ID"
+      - "--max-retries=3"
+      - "--task-timeout=10m"
+images:
+  - "${_REGION}-docker.pkg.dev/$PROJECT_ID/automation/weekly-news-digest:$BUILD_ID"
+substitutions:
+  _REGION: europe-north1
+options:
+  logging: CLOUD_LOGGING_ONLY

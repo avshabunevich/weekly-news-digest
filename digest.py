@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from cloud_state import RunGuard
+
 
 LOG = logging.getLogger("weekly_news_digest")
 GDELT_ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
@@ -471,23 +473,32 @@ def main() -> int:
     if report_path.exists() and not force_send:
         LOG.info("Digest %s already exists; skipping duplicate email", report_path)
         return 0
-
-    articles = collect_articles(start, end)
-    if not articles:
-        raise RuntimeError("No news candidates were collected; refusing to send an empty digest")
-    LOG.info("Collected %d candidate articles", len(articles))
-    digest = generate_digest(articles, start, end)
-    html_body, text_body = render(digest, articles, start, end)
-    subject = f"Еженедельный дайджест новостей — {(run_date or date.today()).strftime('%d.%m.%Y')}"
-    if os.environ.get("DRY_RUN", "false").casefold() == "true":
-        LOG.info("Dry run requested; email was not sent")
-    else:
-        send_email(subject, html_body, text_body)
-    report_dir.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(text_body, encoding="utf-8")
-    Path("weekly-digest.html").write_text(html_body, encoding="utf-8")
-    LOG.info("Digest sent and saved to %s", report_path)
-    return 0
+    guard = RunGuard("weekly-news-digest", f"{end.isocalendar().year}-W{end.isocalendar().week:02d}")
+    if not force_send and not guard.acquire():
+        return 0
+    try:
+        articles = collect_articles(start, end)
+        if not articles:
+            raise RuntimeError("No news candidates were collected; refusing to send an empty digest")
+        LOG.info("Collected %d candidate articles", len(articles))
+        digest = generate_digest(articles, start, end)
+        html_body, text_body = render(digest, articles, start, end)
+        subject = f"Еженедельный дайджест новостей — {(run_date or date.today()).strftime('%d.%m.%Y')}"
+        dry_run = os.environ.get("DRY_RUN", "false").casefold() == "true"
+        if dry_run:
+            LOG.info("Dry run requested; email was not sent")
+        else:
+            send_email(subject, html_body, text_body)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(text_body, encoding="utf-8")
+        Path("weekly-digest.html").write_text(html_body, encoding="utf-8")
+        if not dry_run:
+            guard.mark_sent()
+        LOG.info("Digest sent and saved to %s", report_path)
+        return 0
+    except Exception as error:
+        guard.mark_failed(error)
+        raise
 
 
 if __name__ == "__main__":
