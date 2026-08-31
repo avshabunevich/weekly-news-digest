@@ -1,0 +1,77 @@
+name: Weekly news digest
+
+on:
+  schedule:
+    - cron: "0,15,30,45 8 * * 1"
+      timezone: "Europe/Copenhagen"
+    - cron: "0,15,30,45 9 * * 1"
+      timezone: "Europe/Copenhagen"
+    - cron: "0 10 * * 1"
+      timezone: "Europe/Copenhagen"
+  workflow_dispatch:
+    inputs:
+      force_send:
+        description: Send even if this week's report already exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  models: read
+
+concurrency:
+  group: weekly-news-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt pytest
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Build and send digest
+        env:
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_MODEL: openai/gpt-4.1-mini
+          FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || 'false' }}
+          TZ: Europe/Copenhagen
+        run: python digest.py
+
+      - name: Save report history
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports
+          if git diff --cached --quiet; then
+            echo "No new report to commit"
+          else
+            git commit -m "Add weekly news digest for $(TZ=Europe/Copenhagen date +%F)"
+            git push
+          fi
+
+      - name: Upload rendered digest
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: weekly-news-digest-${{ github.run_id }}
+          path: |
+            weekly-digest.html
+            reports/
+          if-no-files-found: ignore
+          retention-days: 30
