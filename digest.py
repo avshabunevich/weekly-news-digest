@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import html
 import json
 import logging
@@ -8,7 +9,7 @@ import re
 import smtplib
 import sys
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import parsedate_to_datetime
@@ -213,10 +214,8 @@ def article_payload(articles: Iterable[Article]) -> list[dict[str, str]]:
     ]
 
 
-def generate_digest(articles: list[Article], start: date, end: date) -> dict:
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if token and articles:
-        prompt = f"""Подготовь еженедельный новостной дайджест на русском языке за {start.isoformat()}–{end.isoformat()}.
+def digest_prompt(articles: list[Article], start: date, end: date) -> str:
+    return f"""Подготовь еженедельный новостной дайджест на русском языке за {start.isoformat()}–{end.isoformat()}.
 Используй ТОЛЬКО факты из переданного JSON. Не додумывай числа, причины, последствия или статус событий. Если описание скудное, честно ограничься заголовком. Удали дубли между разделами и выбери наиболее значимые материалы.
 
 Верни только JSON-объект вида:
@@ -226,6 +225,23 @@ def generate_digest(articles: list[Article], start: date, end: date) -> dict:
 
 Материалы:
 {json.dumps(article_payload(articles), ensure_ascii=False)}"""
+
+
+def parse_model_response(content: str) -> dict:
+    cleaned = content.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    result = json.loads(cleaned)
+    if not isinstance(result.get("sections"), list):
+        raise ValueError("Model response does not contain a sections list")
+    return result
+
+
+def generate_digest(articles: list[Article], start: date, end: date) -> dict:
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token and articles:
+        prompt = digest_prompt(articles, start, end)
         try:
             response = requests.post(
                 MODELS_ENDPOINT,
@@ -247,9 +263,7 @@ def generate_digest(articles: list[Article], start: date, end: date) -> dict:
             )
             response.raise_for_status()
             content = response.json()["choices"][0]["message"]["content"]
-            result = json.loads(content)
-            if isinstance(result.get("sections"), list):
-                return result
+            return parse_model_response(content)
         except (requests.RequestException, KeyError, IndexError, ValueError, TypeError) as exc:
             LOG.warning("GitHub Models generation failed; using fallback: %s", exc)
     return fallback_digest(articles)
@@ -342,9 +356,61 @@ def required_env(name: str) -> str:
     return value
 
 
+def prepare_for_action(path: Path, today: date | None = None) -> None:
+    start, end = period(today)
+    articles = collect_articles(start, end)
+    if not articles:
+        raise RuntimeError("No news candidates were collected")
+    payload = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "run_date": (today or date.today()).isoformat(),
+        "articles": [asdict(article) for article in articles],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    Path("digest-prompt.txt").write_text(digest_prompt(articles, start, end), encoding="utf-8")
+    LOG.info("Prepared %d candidate articles for AI inference", len(articles))
+
+
+def send_prepared(path: Path, response_path: Path) -> None:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    articles = [Article(**item) for item in payload["articles"]]
+    start = date.fromisoformat(payload["start"])
+    end = date.fromisoformat(payload["end"])
+    run_date = date.fromisoformat(payload["run_date"])
+    report_dir = Path(os.environ.get("REPORT_DIR", "reports"))
+    report_path = report_dir / f"{run_date.isoformat()}.md"
+    force_send = os.environ.get("FORCE_SEND", "false").casefold() == "true"
+    if report_path.exists() and not force_send:
+        LOG.info("Digest %s already exists; skipping duplicate email", report_path)
+        return
+    try:
+        digest = parse_model_response(response_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as exc:
+        LOG.warning("AI response was unusable; using fallback: %s", exc)
+        digest = fallback_digest(articles)
+    html_body, text_body = render(digest, articles, start, end)
+    subject = f"Еженедельный дайджест новостей — {run_date.strftime('%d.%m.%Y')}"
+    send_email(subject, html_body, text_body)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(text_body, encoding="utf-8")
+    Path("weekly-digest.html").write_text(html_body, encoding="utf-8")
+    LOG.info("Digest sent and saved to %s", report_path)
+
+
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--send-prepared", metavar="RESPONSE_FILE")
+    args = parser.parse_args()
     run_date = date.fromisoformat(os.environ["RUN_DATE"]) if os.environ.get("RUN_DATE") else None
+    if args.prepare:
+        prepare_for_action(Path("digest-candidates.json"), run_date)
+        return 0
+    if args.send_prepared:
+        send_prepared(Path("digest-candidates.json"), Path(args.send_prepared))
+        return 0
     start, end = period(run_date)
     report_dir = Path(os.environ.get("REPORT_DIR", "reports"))
     report_path = report_dir / f"{(run_date or date.today()).isoformat()}.md"
