@@ -17,7 +17,6 @@ on:
 
 permissions:
   contents: write
-  models: read
 
 concurrency:
   group: weekly-news-digest
@@ -41,28 +40,14 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-      - name: Collect news candidates
-        env:
-          TZ: Europe/Copenhagen
-        run: python digest.py --prepare
-
-      - name: Edit digest in Russian
-        id: inference
-        uses: actions/ai-inference@v1
-        with:
-          prompt-file: digest-prompt.txt
-          model: openai/gpt-4o
-          max-completion-tokens: 5000
-          temperature: 0.1
-
-      - name: Send digest by email
+      - name: Build and send digest
         env:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || 'false' }}
           TZ: Europe/Copenhagen
-        run: python digest.py --send-prepared "${{ steps.inference.outputs.response-file }}"
+        run: python digest.py
 
       - name: Save report history
         shell: bash

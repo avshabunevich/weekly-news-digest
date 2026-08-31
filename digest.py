@@ -43,13 +43,13 @@ SECTION_SPECS = {
         "label": "Мир — топ-3",
         "count": 3,
         "query": '(conflict OR election OR diplomacy OR disaster OR "United Nations") sourcelang:english',
-        "google_query": 'world news when:7d',
+        "google_query": '(war OR conflict OR election OR diplomacy OR disaster) (source:Reuters OR source:AP News) when:7d',
     },
     "denmark": {
         "label": "Дания и Копенгаген — топ-2",
         "count": 2,
         "query": '(Denmark OR Danish OR Copenhagen) sourcelang:english',
-        "google_query": '(Denmark OR Copenhagen) news when:7d',
+        "google_query": '(Denmark OR Danish OR Copenhagen) (government OR economy OR politics OR city) when:7d',
     },
     "economy": {
         "label": "Мировая экономика — топ-3",
@@ -61,7 +61,7 @@ SECTION_SPECS = {
         "label": "Миграционная политика Дании и Permanent Residence",
         "count": 3,
         "query": '(Denmark migration OR Denmark immigration OR "permanent residence" Denmark OR asylum Denmark)',
-        "google_query": '(Denmark immigration OR Denmark migration OR Denmark permanent residence OR Denmark asylum) when:7d',
+        "google_query": 'Denmark (immigration OR migration OR asylum OR permanent residence) when:7d',
     },
     "astrophysics": {
         "label": "Астрофизика — топ-2",
@@ -113,6 +113,16 @@ def collect_articles(start: date, end: date) -> list[Article]:
         for record in records:
             title = str(record.get("title") or "").strip()
             url = str(record.get("url") or "").strip()
+            searchable = f"{title} {record.get('description') or ''}".casefold()
+            if section in {"denmark", "migration"} and not any(
+                word in searchable for word in ("denmark", "danish", "copenhagen")
+            ):
+                continue
+            if section == "astrophysics" and not any(
+                word in searchable
+                for word in ("nasa", "esa", "astronomy", "astrophysics", "telescope", "exoplanet", "galaxy")
+            ):
+                continue
             if not title or not url or url in seen_urls:
                 continue
             title_key = canonical_key(title)
@@ -169,6 +179,9 @@ def google_news_records(
             continue
         source_node = item.find("source")
         source = (source_node.text or "").strip() if source_node is not None else "Google News"
+        suffix = f" - {source}"
+        if title.casefold().endswith(suffix.casefold()):
+            title = title[: -len(suffix)].rstrip()
         description_html = item.findtext("description") or ""
         description = BeautifulSoup(description_html, "html.parser").get_text(" ", strip=True)
         records.append(
@@ -240,6 +253,8 @@ def parse_model_response(content: str) -> dict:
 
 def generate_digest(articles: list[Article], start: date, end: date) -> dict:
     token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if os.environ.get("ENABLE_GITHUB_MODELS", "false").casefold() != "true":
+        token = ""
     if token and articles:
         prompt = digest_prompt(articles, start, end)
         try:
@@ -269,19 +284,41 @@ def generate_digest(articles: list[Article], start: date, end: date) -> dict:
     return fallback_digest(articles)
 
 
+def translate_ru(text: str, session: requests.Session) -> str:
+    value = re.sub(r"\s+", " ", text).strip()
+    if not value:
+        return ""
+    try:
+        response = session.get(
+            "https://translate.googleapis.com/translate_a/single",
+            params={"client": "gtx", "sl": "auto", "tl": "ru", "dt": "t", "q": value[:3500]},
+            timeout=20,
+        )
+        response.raise_for_status()
+        chunks = response.json()[0]
+        translated = "".join(str(chunk[0] or "") for chunk in chunks)
+        return translated.strip() or value
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        return value
+
+
 def fallback_digest(articles: list[Article]) -> dict:
     by_section: dict[str, list[Article]] = {key: [] for key in SECTION_SPECS}
     for article in articles:
         by_section.get(article.section, []).append(article)
     sections = []
+    session = requests.Session()
+    session.headers["User-Agent"] = USER_AGENT
     for key, spec in SECTION_SPECS.items():
         items = []
         for article in by_section[key][:{"world": 3, "denmark": 2, "economy": 3, "migration": 3, "astrophysics": 2}[key]]:
             items.append(
                 {
                     "id": article.article_id,
-                    "title_ru": article.title,
-                    "summary_ru": article.description or "Доступны заголовок и ссылка на первоисточник.",
+                    "title_ru": translate_ru(article.title, session),
+                    "summary_ru": translate_ru(article.description, session)
+                    if article.description and canonical_key(article.description) != canonical_key(article.title)
+                    else "Подробности доступны по ссылке на источник.",
                     "why_ru": "",
                 }
             )

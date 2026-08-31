@@ -1,4 +1,5 @@
 from datetime import date
+from unittest.mock import patch
 
 from digest import Article, canonical_key, fallback_digest, period, render
 
@@ -13,8 +14,8 @@ def test_canonical_key_normalizes_punctuation_and_case() -> None:
 
 def test_fallback_and_render_keep_source_link() -> None:
     article = Article("world-1", "world", "Title", "https://example.com/a", "example.com", "20260830", "Summary")
-    digest = fallback_digest([article])
+    with patch("digest.translate_ru", side_effect=lambda text, session: text):
+        digest = fallback_digest([article])
     html_body, text_body = render(digest, [article], date(2026, 8, 24), date(2026, 8, 30))
     assert "https://example.com/a" in html_body
     assert "https://example.com/a" in text_body
-
