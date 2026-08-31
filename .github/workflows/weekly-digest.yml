@@ -14,6 +14,10 @@ on:
         description: Send even if this week's report already exists
         type: boolean
         default: false
+      send_email:
+        description: Send the email (disable only for a dry-run test)
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -46,6 +50,7 @@ jobs:
           SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           FORCE_SEND: ${{ github.event_name == 'workflow_dispatch' && inputs.force_send || 'false' }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.send_email == false || 'false' }}
           TZ: Europe/Copenhagen
         run: python digest.py
 

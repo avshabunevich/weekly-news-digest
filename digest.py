@@ -290,6 +290,18 @@ def translate_ru(text: str, session: requests.Session) -> str:
         return ""
     try:
         response = session.get(
+            "https://api.mymemory.translated.net/get",
+            params={"q": value[:480], "langpair": "en|ru"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        translated = str(response.json()["responseData"]["translatedText"] or "").strip()
+        if translated and translated.casefold() != value.casefold():
+            return translated
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        pass
+    try:
+        response = session.get(
             "https://translate.googleapis.com/translate_a/single",
             params={"client": "gtx", "sl": "auto", "tl": "ru", "dt": "t", "q": value[:3500]},
             timeout=20,
@@ -317,7 +329,8 @@ def fallback_digest(articles: list[Article]) -> dict:
                     "id": article.article_id,
                     "title_ru": translate_ru(article.title, session),
                     "summary_ru": translate_ru(article.description, session)
-                    if article.description and canonical_key(article.description) != canonical_key(article.title)
+                    if article.description
+                    and canonical_key(article.title) not in canonical_key(article.description)
                     else "Подробности доступны по ссылке на источник.",
                     "why_ru": "",
                 }
@@ -428,7 +441,10 @@ def send_prepared(path: Path, response_path: Path) -> None:
         digest = fallback_digest(articles)
     html_body, text_body = render(digest, articles, start, end)
     subject = f"Еженедельный дайджест новостей — {run_date.strftime('%d.%m.%Y')}"
-    send_email(subject, html_body, text_body)
+    if os.environ.get("DRY_RUN", "false").casefold() == "true":
+        LOG.info("Dry run requested; email was not sent")
+    else:
+        send_email(subject, html_body, text_body)
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path.write_text(text_body, encoding="utf-8")
     Path("weekly-digest.html").write_text(html_body, encoding="utf-8")
@@ -463,7 +479,10 @@ def main() -> int:
     digest = generate_digest(articles, start, end)
     html_body, text_body = render(digest, articles, start, end)
     subject = f"Еженедельный дайджест новостей — {(run_date or date.today()).strftime('%d.%m.%Y')}"
-    send_email(subject, html_body, text_body)
+    if os.environ.get("DRY_RUN", "false").casefold() == "true":
+        LOG.info("Dry run requested; email was not sent")
+    else:
+        send_email(subject, html_body, text_body)
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path.write_text(text_body, encoding="utf-8")
     Path("weekly-digest.html").write_text(html_body, encoding="utf-8")
