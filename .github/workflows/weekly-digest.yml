@@ -1,13 +1,6 @@
 name: Weekly news digest
 
 on:
-  schedule:
-    - cron: "0,15,30,45 8 * * 1"
-      timezone: "Europe/Copenhagen"
-    - cron: "0,15,30,45 9 * * 1"
-      timezone: "Europe/Copenhagen"
-    - cron: "0 10 * * 1"
-      timezone: "Europe/Copenhagen"
   workflow_dispatch:
     inputs:
       force_send:
