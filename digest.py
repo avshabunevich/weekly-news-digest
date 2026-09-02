@@ -473,8 +473,9 @@ def main() -> int:
     if report_path.exists() and not force_send:
         LOG.info("Digest %s already exists; skipping duplicate email", report_path)
         return 0
+    dry_run = os.environ.get("DRY_RUN", "false").casefold() == "true"
     guard = RunGuard("weekly-news-digest", f"{end.isocalendar().year}-W{end.isocalendar().week:02d}")
-    if not force_send and not guard.acquire():
+    if not force_send and not dry_run and not guard.acquire():
         return 0
     try:
         articles = collect_articles(start, end)
@@ -484,7 +485,6 @@ def main() -> int:
         digest = generate_digest(articles, start, end)
         html_body, text_body = render(digest, articles, start, end)
         subject = f"Еженедельный дайджест новостей — {(run_date or date.today()).strftime('%d.%m.%Y')}"
-        dry_run = os.environ.get("DRY_RUN", "false").casefold() == "true"
         if dry_run:
             LOG.info("Dry run requested; email was not sent")
         else:
