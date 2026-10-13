@@ -21,6 +21,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from cloud_state import RunGuard
+from news_selection import WORLD_QUERIES, rank_articles, select_world
 
 
 LOG = logging.getLogger("weekly_news_digest")
@@ -42,9 +43,9 @@ class Article:
 
 SECTION_SPECS = {
     "world": {
-        "label": "Мир — топ-3",
+        "label": "Мир — главные события",
         "count": 3,
-        "query": '(conflict OR election OR diplomacy OR disaster OR "United Nations") sourcelang:english',
+        "query": '(conflict OR election OR diplomacy OR disaster OR terrorism OR hijacking OR "plane crash" OR earthquake OR coup) sourcelang:english',
         "google_query": '(war OR conflict OR election OR diplomacy OR disaster) (source:Reuters OR source:AP News) when:7d',
     },
     "denmark": {
@@ -87,18 +88,21 @@ def canonical_key(title: str) -> str:
 def collect_articles(start: date, end: date) -> list[Article]:
     collected: list[Article] = []
     seen_urls: set[str] = set()
-    seen_titles: set[str] = set()
+    seen_titles: set[tuple[str, str, str]] = set()
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
 
     for section, spec in SECTION_SPECS.items():
-        records = google_news_records(session, str(spec["google_query"]), start, end)
+        queries = WORLD_QUERIES if section == "world" else (str(spec["google_query"]),)
+        records = []
+        for query in queries:
+            records.extend(google_news_records(session, query, start, end))
         params = {
             "query": spec["query"],
             "mode": "artlist",
             "format": "json",
-            "maxrecords": 45,
-            "sort": "datedesc",
+            "maxrecords": 250,
+            "sort": "hybridrel",
             "startdatetime": start.strftime("%Y%m%d000000"),
             "enddatetime": (end + timedelta(days=1)).strftime("%Y%m%d000000"),
         }
@@ -127,8 +131,9 @@ def collect_articles(start: date, end: date) -> list[Article]:
                 continue
             if not title or not url or url in seen_urls:
                 continue
-            title_key = canonical_key(title)
-            if not title_key or title_key in seen_titles:
+            # Retain different publishers until ranking can measure coverage.
+            title_key = (section, canonical_key(title), str(record.get("domain") or "").casefold())
+            if not title_key[1] or title_key in seen_titles:
                 continue
             seen_urls.add(url)
             seen_titles.add(title_key)
@@ -143,13 +148,13 @@ def collect_articles(start: date, end: date) -> list[Article]:
                 published=published,
                 description=(
                     str(record.get("description") or "").strip()[:600]
-                    or (fetch_description(session, url) if "news.google.com" not in urlparse(url).netloc else "")
+                    # Avoid one HTTP page request per candidate; RSS/GDELT
+                    # metadata suffices for ranking and attributed headlines.
                 ),
             )
             collected.append(article)
             section_count += 1
-            if section_count >= 16:
-                break
+        LOG.info("Collected %d candidates for %s before event ranking", section_count, section)
     return collected
 
 
@@ -157,6 +162,9 @@ def google_news_records(
     session: requests.Session, query: str, start: date, end: date
 ) -> list[dict[str, str]]:
     try:
+        # Explicit dates also make historical regression runs reproducible.
+        query = re.sub(r'\bwhen:\S+', '', query).strip()
+        query += f" after:{(start - timedelta(days=1)).isoformat()} before:{(end + timedelta(days=1)).isoformat()}"
         response = session.get(
             "https://news.google.com/rss/search",
             params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"},
@@ -176,7 +184,7 @@ def google_news_records(
         try:
             published_dt = parsedate_to_datetime(published_text).date()
         except (TypeError, ValueError, OverflowError):
-            published_dt = end
+            continue
         if published_dt < start or published_dt > end or not title or not link:
             continue
         source_node = item.find("source")
@@ -236,7 +244,7 @@ def digest_prompt(articles: list[Article], start: date, end: date) -> str:
 Верни только JSON-объект вида:
 {{"sections":[{{"key":"world","title":"...","items":[{{"id":"world-1","title_ru":"...","summary_ru":"2–3 предложения","why_ru":"Почему важно, 1 предложение"}}]}}]}}
 
-Нужные разделы и максимум пунктов: world=3, denmark=2, economy=3, migration=3, astrophysics=2. Для migration, если нет подтверждённых изменений правил permanent residence, добавь после отобранных новостей объект без id с title_ru «Permanent Residence», summary_ru «Подтверждённых изменений общих требований за период не обнаружено», why_ru="". Сохраняй ссылки через id — URL не изменяй.
+Нужные разделы и максимум пунктов: world=5, denmark=2, economy=3, migration=3, astrophysics=2. Для migration, если нет подтверждённых изменений правил permanent residence, добавь после отобранных новостей объект без id с title_ru «Permanent Residence», summary_ru «Подтверждённых изменений общих требований за период не обнаружено», why_ru="". Сохраняй ссылки через id — URL не изменяй.
 
 Материалы:
 {json.dumps(article_payload(articles), ensure_ascii=False)}"""
@@ -258,7 +266,7 @@ def generate_digest(articles: list[Article], start: date, end: date) -> dict:
     if os.environ.get("ENABLE_GITHUB_MODELS", "false").casefold() != "true":
         token = ""
     if token and articles:
-        prompt = digest_prompt(articles, start, end)
+        prompt = digest_prompt(select_articles(articles), start, end)
         try:
             response = requests.post(
                 MODELS_ENDPOINT,
@@ -316,16 +324,27 @@ def translate_ru(text: str, session: requests.Session) -> str:
         return value
 
 
+def select_articles(articles: list[Article]) -> list[Article]:
+    selected = []
+    for key, spec in SECTION_SPECS.items():
+        candidates = [a for a in articles if a.section == key]
+        chosen = (select_world(candidates, int(spec["count"])) if key == "world"
+                  else rank_articles(candidates)[:int(spec["count"])])
+        LOG.info("Selected %s: %s", key, [a.title for a in chosen])
+        selected.extend(chosen)
+    return selected
+
+
 def fallback_digest(articles: list[Article]) -> dict:
     by_section: dict[str, list[Article]] = {key: [] for key in SECTION_SPECS}
-    for article in articles:
+    for article in select_articles(articles):
         by_section.get(article.section, []).append(article)
     sections = []
     session = requests.Session()
     session.headers["User-Agent"] = USER_AGENT
     for key, spec in SECTION_SPECS.items():
         items = []
-        for article in by_section[key][:{"world": 3, "denmark": 2, "economy": 3, "migration": 3, "astrophysics": 2}[key]]:
+        for article in by_section[key]:
             items.append(
                 {
                     "id": article.article_id,

@@ -5,7 +5,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY digest.py cloud_state.py ./
+COPY digest.py cloud_state.py news_selection.py ./
 
 RUN useradd --create-home app && chown -R app:app /app
 USER app
